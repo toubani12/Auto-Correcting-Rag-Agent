@@ -41,90 +41,83 @@ The system is implemented as a **LangGraph StateGraph** — a directed graph who
 
 ```mermaid
 graph TD
-    A([▶ START]) --> B
+    A([START]) --> B
 
-    B["🔍 retrieve\n─────────────────\nQuery: ChromaDB via MMR\nIncrements: loop_step\nOutput: documents[]"]
-
+    B["retrieve\nChromaDB MMR Search\nIncrements loop_step"]
     B --> C
 
-    C["⚖️ grade_documents\n─────────────────\nLLM grades each document\nComputes: relevant_fraction\nWrites: relevance_decision"]
+    C["grade_documents\nLLM grades each document\nComputes relevant_fraction\nWrites relevance_decision"]
+    C --> D
 
-    C --> D{{"🔀 route_after_grading\n─────────────────\nrelevance_decision?\nloop_step >= 3?"}}
+    D{"route_after_grading\nrelevance_decision?\nloop_step >= 3?"}
 
-    D -- "✅ relevant_fraction ≥ 0.5\nOR loop_step ≥ MAX" --> E
-    D -- "❌ relevant_fraction < 0.5\nAND loop_step < MAX" --> F
+    D -- "relevant_fraction >= 0.5 OR loop_step >= MAX" --> E
+    D -- "relevant_fraction < 0.5 AND loop_step < MAX" --> F
 
-    F["✏️ transform_query\n─────────────────\nLLM rewrites query\nDomain: GCN + EEG vocab\nOutput: improved question"]
+    F["transform_query\nLLM rewrites query\nGCN and EEG vocabulary enrichment"]
+    F -- "Loop back - max 3 iterations" --> B
 
-    F -- "Loop Back\n(max 3×)" --> B
-
-    E["📝 generate\n─────────────────\nFilters: relevant docs only\nSynthesises: academic answer\nGrounds: in context metadata"]
-
-    E --> G([⏹ END])
-
-    style A fill:#1a1a2e,color:#e0e0e0,stroke:#4a9eff
-    style G fill:#1a1a2e,color:#e0e0e0,stroke:#4a9eff
-    style B fill:#0f3460,color:#e0e0e0,stroke:#4a9eff
-    style C fill:#16213e,color:#e0e0e0,stroke:#f0a500
-    style D fill:#533483,color:#ffffff,stroke:#9d71ea
-    style E fill:#0d7377,color:#ffffff,stroke:#14a085
-    style F fill:#c84b31,color:#ffffff,stroke:#e05c3a
+    E["generate\nFilters relevant docs\nSynthesises academic answer"]
+    E --> G([END])
 ```
 
 ### 1.2 Detailed Node and Edge Specification
 
 ```mermaid
 graph TD
-    subgraph INIT["🚀 Initialisation"]
-        I1["_build_initial_state(question)\n• question = original_question\n• loop_step = 0\n• generation = None\n• error = None"]
+    subgraph INIT["Initialisation"]
+        I1["_build_initial_state"]
+        I2["question, loop_step=0, generation=None"]
+        I1 --> I2
     end
 
-    subgraph RETRIEVE_NODE["Node: retrieve()"]
-        R1["vectorstore.as_retriever()\nsearch_type = 'mmr'\nfetch_k = TOP_K × 3\nlambda_mult = 0.7"]
-        R2["state update:\n• documents ← List[Document]\n• loop_step ← loop_step + 1\n• error ← None | str"]
+    subgraph RETRIEVE_NODE["Node: retrieve"]
+        R1["vectorstore MMR search"]
+        R2["search_type=mmr, fetch_k=TOP_K*3, lambda_mult=0.7"]
+        R3["Output: documents list, loop_step incremented"]
+        R1 --> R2 --> R3
     end
 
-    subgraph GRADE_NODE["Node: grade_documents()"]
-        G1["For each doc:\ngrader_chain.invoke()\n→ RelevanceGrade(Pydantic)"]
-        G2["binary_score: yes | no\nconfidence: float[0,1]\nrationale: str"]
-        G3["Compute:\nrelevant_fraction = n_relevant / n_total"]
-        G4["state update:\n• graded_documents ← List[GradedDocument]\n• relevance_decision ← generate | transform_query"]
+    subgraph GRADE_NODE["Node: grade_documents"]
+        G1["grader_chain.invoke per document"]
+        G2["RelevanceGrade: binary_score, confidence, rationale"]
+        G3["relevant_fraction = n_relevant divided by n_total"]
+        G4["Output: graded_documents, relevance_decision"]
+        G1 --> G2 --> G3 --> G4
     end
 
-    subgraph ROUTER["Conditional Edge: route_after_grading()"]
-        RT1{{"loop_step ≥ MAX_RETRIEVE_ITERATIONS?"}}
-        RT2{{"relevant_fraction ≥ RELEVANCE_THRESHOLD?"}}
-        RT3["→ 'generate'"]
-        RT4["→ 'transform_query'"]
+    subgraph ROUTER["Conditional Edge: route_after_grading"]
+        RT1{"loop_step >= MAX_RETRIEVE_ITERATIONS?"}
+        RT2{"relevant_fraction >= RELEVANCE_THRESHOLD?"}
+        RT3["Route to generate"]
+        RT4["Route to transform_query"]
+        RT1 -- "Yes" --> RT3
+        RT1 -- "No" --> RT2
+        RT2 -- "Yes" --> RT3
+        RT2 -- "No" --> RT4
     end
 
-    subgraph TRANSFORM_NODE["Node: transform_query()"]
-        T1["transformer_chain.invoke()\n→ TransformedQuery(Pydantic)"]
-        T2["improved_query: str\nreasoning: str"]
-        T3["state update:\n• question ← improved_query\n• original_question: IMMUTABLE"]
+    subgraph TRANSFORM_NODE["Node: transform_query"]
+        T1["transformer_chain.invoke"]
+        T2["Output: TransformedQuery - improved_query, reasoning"]
+        T3["State: question updated, original_question IMMUTABLE"]
+        T1 --> T2 --> T3
     end
 
-    subgraph GENERATE_NODE["Node: generate()"]
-        GN1["Filter: graded_docs WHERE relevance='relevant'"]
-        GN2["Format context:\n[Source: title (year)]\npage_content"]
-        GN3["generator_chain.invoke()\n→ StrOutputParser()"]
-        GN4["state update:\n• generation ← synthesised_answer"]
+    subgraph GENERATE_NODE["Node: generate"]
+        GN1["Filter graded_docs where relevance=relevant"]
+        GN2["Format context with source metadata"]
+        GN3["generator_chain.invoke"]
+        GN4["Output: generation - synthesised academic answer"]
+        GN1 --> GN2 --> GN3 --> GN4
     end
 
     INIT --> RETRIEVE_NODE
-    R1 --> R2
     RETRIEVE_NODE --> GRADE_NODE
-    G1 --> G2 --> G3 --> G4
     GRADE_NODE --> ROUTER
-    RT1 -- Yes --> RT3
-    RT1 -- No --> RT2
-    RT2 -- Yes --> RT3
-    RT2 -- No --> RT4
     RT3 --> GENERATE_NODE
     RT4 --> TRANSFORM_NODE
-    T1 --> T2 --> T3
     TRANSFORM_NODE --> RETRIEVE_NODE
-    GN1 --> GN2 --> GN3 --> GN4
 ```
 
 ---
@@ -139,30 +132,30 @@ The Self-Reflective RAG methodology introduced in this project addresses this li
 
 ```mermaid
 graph LR
-    subgraph "Phase 1: Retrieval"
-        P1A["User Query\n(natural language)"] --> P1B["Dense Vector\nEmbedding"]
-        P1B --> P1C["MMR Search\nChromaDB"]
-        P1C --> P1D["Candidate\nDocuments"]
+    subgraph P1["Phase 1 - Retrieval"]
+        P1A["User Query"] --> P1B["Dense Vector Embedding"]
+        P1B --> P1C["MMR Search - ChromaDB"]
+        P1C --> P1D["Candidate Documents"]
     end
 
-    subgraph "Phase 2: Grading"
-        P2A["Document + Query\n→ LLM Grader"] --> P2B["RelevanceGrade\n(Pydantic)"]
-        P2B --> P2C{"Quality\nAssessment"}
+    subgraph P2["Phase 2 - Grading"]
+        P2A["Document and Query sent to LLM Grader"] --> P2B["RelevanceGrade - Pydantic"]
+        P2B --> P2C{"Quality Assessment"}
     end
 
-    subgraph "Phase 3a: Transformation (if needed)"
-        P3A["Original + Current\nQuery → LLM"] --> P3B["TransformedQuery\n(Pydantic)"]
-        P3B --> P3C["Enriched Query\n(GCN/EEG vocabulary)"]
+    subgraph P3["Phase 3a - Transformation if needed"]
+        P3A["Original and Current Query sent to LLM"] --> P3B["TransformedQuery - Pydantic"]
+        P3B --> P3C["Enriched Query - GCN and EEG vocabulary"]
     end
 
-    subgraph "Phase 3b: Generation (if sufficient)"
-        P4A["Relevant Docs\n(filtered)"] --> P4B["Generator LLM\n(GPT-4o)"]
-        P4B --> P4C["Academic\nSynthesis"]
+    subgraph P4["Phase 3b - Generation if sufficient"]
+        P4A["Relevant Docs - filtered"] --> P4B["Generator LLM - GPT-4o"]
+        P4B --> P4C["Academic Synthesis"]
     end
 
     P1D --> P2A
-    P2C -- "Insufficient\n(fraction < 0.5)" --> P3A
-    P2C -- "Sufficient\n(fraction ≥ 0.5)" --> P4A
+    P2C -- "Insufficient - fraction below 0.5" --> P3A
+    P2C -- "Sufficient - fraction above 0.5" --> P4A
     P3C -- "Re-query" --> P1B
 ```
 
